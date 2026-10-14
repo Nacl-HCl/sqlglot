@@ -10,14 +10,18 @@ from sqlglot.errors import ParseError, TokenError
 from sqlglot.expressions.core import (
     Alias,
     Anonymous,
+    Binary,
     Boolean,
     Column,
     Condition,
+    Dot,
     EQ,
     Expr,
+    Func,
     Identifier,
     Literal,
     Null,
+    Paren,
     Placeholder,
     TABLE_PARTS,
     Var,
@@ -36,6 +40,7 @@ from sqlglot.expressions.query import (
     From,
     Schema,
     Select,
+    Subquery,
     Table,
     TableAlias,
     Tuple,
@@ -53,11 +58,10 @@ from sqlglot.expressions.array import Array
 if t.TYPE_CHECKING:
     from collections.abc import Sequence, Iterable, Iterator
     from sqlglot.dialects.dialect import DialectType
-    from sqlglot.expressions.core import ExpOrStr, Func
+    from sqlglot.expressions.core import ExpOrStr
     from sqlglot.expressions.datatypes import DATA_TYPE
     from sqlglot._typing import ParserArgs, ParserNoDialectArgs, E, P
     from typing_extensions import Unpack, Concatenate
-    from sqlglot.expressions.core import Dot
 
 
 def select(
@@ -849,6 +853,40 @@ def replace_tables(
     return expression.transform(_replace_tables, copy=copy)  # type: ignore
 
 
+ATOMIC_EXPRESSIONS = (
+    Boolean,
+    Column,
+    Dot,
+    Func,
+    Identifier,
+    Literal,
+    Paren,
+    Subquery,
+    Table,
+    Tuple,
+)
+
+
+def _is_operator(expression: Expr) -> bool:
+    # Or and JSONExtract are also Funcs, and Dot never needs parentheses
+    return isinstance(expression, Binary) and not isinstance(expression, Dot)
+
+
+def _replace_placeholder(placeholder: Placeholder, expression: Expr) -> Expr:
+    parent = placeholder.parent
+    if (
+        not parent
+        or placeholder.index is not None
+        or isinstance(parent, Alias)
+        or (isinstance(parent, Func) and not _is_operator(parent))
+        or (isinstance(expression, ATOMIC_EXPRESSIONS) and not _is_operator(expression))
+    ):
+        return expression
+    if isinstance(expression, Query):
+        return expression.subquery(copy=False)
+    return Paren(this=expression)
+
+
 def replace_placeholders(expression: Expr, *args: object, **kwargs: t.Any) -> Expr:
     """Replace placeholders in an expression.
 
@@ -874,10 +912,10 @@ def replace_placeholders(expression: Expr, *args: object, **kwargs: t.Any) -> Ex
             if node.this:
                 new_name = kwargs.get(node.this)
                 if new_name is not None:
-                    return convert(new_name)
+                    return _replace_placeholder(node, convert(new_name))
             else:
                 try:
-                    return convert(next(args))
+                    return _replace_placeholder(node, convert(next(args)))
                 except StopIteration:
                     pass
         return node
